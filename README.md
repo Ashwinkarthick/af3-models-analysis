@@ -16,4 +16,6 @@ To install the required dependencies, clone this repository and run:
 pip install -r requirements.txt
 
 To run the app locally, use the following command:
+
+```bash
 streamlit run app_streamlit_final.py
