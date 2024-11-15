@@ -14,7 +14,9 @@ To install the required dependencies, clone this repository and run:
 
 ```bash
 pip install -r requirements.txt
+````
 
+## Usage
 To run the app locally, use the following command:
 
 ```bash
