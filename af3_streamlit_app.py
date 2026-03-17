@@ -32,6 +32,40 @@ def extract_data(file_or_path):
         st.error(f"Error reading JSON file: {e}")
         return None
 
+# Helper function to extract PAE matrix from AF3 or AF2 style JSON
+def extract_pae_matrix(json_data):
+    if json_data is None:
+        return None
+
+    if isinstance(json_data, dict):
+        if 'pae' in json_data:
+            return np.array(json_data['pae'])
+        if 'predicted_aligned_error' in json_data:
+            return np.array(json_data['predicted_aligned_error'])
+        if all(key in json_data for key in ('residue1', 'residue2', 'distance')):
+            residue1 = np.array(json_data['residue1'], dtype=int)
+            residue2 = np.array(json_data['residue2'], dtype=int)
+            distance = np.array(json_data['distance'], dtype=float)
+            size = max(residue1.max(), residue2.max())
+            matrix = np.full((size, size), np.nan)
+            matrix[residue1 - 1, residue2 - 1] = distance
+            return matrix
+
+    if isinstance(json_data, list) and len(json_data) > 0 and isinstance(json_data[0], dict):
+        first_item = json_data[0]
+        if 'predicted_aligned_error' in first_item:
+            return np.array(first_item['predicted_aligned_error'])
+        if all(key in first_item for key in ('residue1', 'residue2', 'distance')):
+            residue1 = np.array(first_item['residue1'], dtype=int)
+            residue2 = np.array(first_item['residue2'], dtype=int)
+            distance = np.array(first_item['distance'], dtype=float)
+            size = max(residue1.max(), residue2.max())
+            matrix = np.full((size, size), np.nan)
+            matrix[residue1 - 1, residue2 - 1] = distance
+            return matrix
+
+    return None
+
 # Helper function to calculate chain lengths from token_res_ids
 def calculate_chain_lengths(token_res_ids):
     chain_lengths = []
@@ -250,6 +284,9 @@ def scan_model_files(folder_path):
                 model_match = re.match(r'(.*)_model_(\d+)\.cif', file_name)
                 summary_match = re.match(r'(.*)_summary_confidences_(\d+)\.json', file_name)
                 full_data_match = re.match(r'(.*)_full_data_(\d+)\.json', file_name)
+                af2_model_match = re.match(r'ranked_(\d+)\.cif', file_name)
+                af2_pae_match = re.match(r'pae_model_\d+_.*_pred_(\d+)\.json', file_name)
+                af2_pae_ranked_match = re.match(r'pae_ranked_(\d+)\.json', file_name)
 
                 if model_match:
                     model_base_name = model_match.group(1)
@@ -257,6 +294,7 @@ def scan_model_files(folder_path):
                     if index not in models:
                         models[index] = {}
                     models[index]['model'] = os.path.join(root, file_name)
+                    models[index]['format'] = 'af3'
                     if not base_name:
                         base_name = model_base_name
                 if summary_match:
@@ -265,6 +303,7 @@ def scan_model_files(folder_path):
                     if index not in models:
                         models[index] = {}
                     models[index]['summary'] = os.path.join(root, file_name)
+                    models[index]['format'] = 'af3'
                     if not base_name:
                         base_name = summary_base_name
                 if full_data_match:
@@ -273,8 +312,27 @@ def scan_model_files(folder_path):
                     if index not in models:
                         models[index] = {}
                     models[index]['full_data'] = os.path.join(root, file_name)
+                    models[index]['format'] = 'af3'
                     if not base_name:
                         base_name = full_data_base_name
+                if af2_model_match:
+                    index = af2_model_match.group(1)
+                    if index not in models:
+                        models[index] = {}
+                    models[index]['model'] = os.path.join(root, file_name)
+                    models[index].setdefault('format', 'af2')
+                if af2_pae_match:
+                    index = af2_pae_match.group(1)
+                    if index not in models:
+                        models[index] = {}
+                    models[index]['full_data'] = os.path.join(root, file_name)
+                    models[index].setdefault('format', 'af2')
+                if af2_pae_ranked_match:
+                    index = af2_pae_ranked_match.group(1)
+                    if index not in models:
+                        models[index] = {}
+                    models[index]['full_data'] = os.path.join(root, file_name)
+                    models[index].setdefault('format', 'af2')
 
         return models, base_name
     except FileNotFoundError:
@@ -384,7 +442,7 @@ if st.button("Analyze Models"):
                 summary_file = file_set.get('summary')
 
                 if summary_file:
-                    summary_data = extract_data(summary_file)
+                    summary_data = extract_data(summary_file) if summary_file else None
                     # Collect summary information for all models
                     model_summary_df = {
                         'Model Name': model_name,
@@ -396,7 +454,7 @@ if st.button("Analyze Models"):
                         'Ranking Score': summary_data.get('ranking_score', 'N/A')
                     }
                     all_models_summary.append(model_summary_df)
-                else:
+                elif file_set.get('format', 'af3') == 'af3':
                     st.error(f"Missing summary file for {model_name}.")
 
             # Display consolidated summary before individual models
@@ -413,10 +471,10 @@ if st.button("Analyze Models"):
                 full_data_file = file_set.get('full_data')
                 summary_file = file_set.get('summary')
 
-                if cif_file and full_data_file and summary_file:
+                if cif_file and full_data_file:
                     full_data = extract_data(full_data_file)
-                    summary_data = extract_data(summary_file)
-                    if full_data and summary_data:
+                    summary_data = extract_data(summary_file) if summary_file else None
+                    if full_data:
                         st.write(f"## {model_name}")
                         # Display 3D model and PAE heatmap side by side
                         col1, col2 = st.columns([1, 1], gap="medium")  # Equal column widths
@@ -424,12 +482,13 @@ if st.button("Analyze Models"):
                             visualize_structure_with_molstar(cif_file)
 
                         with col2:
-                            pae_matrix = full_data.get('pae', None)
+                            pae_matrix = extract_pae_matrix(full_data)
                             if pae_matrix is not None:
                                 plot_pae_heatmap(pae_matrix, model_name)
 
-                        # Display ptm and ipTM averages and ipTM matrix
-                        display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
+                        # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
+                        if summary_data:
+                            display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
                     else:
                         st.error(f"Missing or invalid data for {model_name}.")
                 else:
@@ -449,6 +508,9 @@ if st.button("Analyze Models"):
                 model_match = re.match(r'(.*)_model_(\d+)\.cif', file.name)
                 summary_match = re.match(r'(.*)_summary_confidences_(\d+)\.json', file.name)
                 full_data_match = re.match(r'(.*)_full_data_(\d+)\.json', file.name)
+                af2_model_match = re.match(r'ranked_(\d+)\.cif', file.name)
+                af2_pae_match = re.match(r'pae_model_\d+_.*_pred_(\d+)\.json', file.name)
+                af2_pae_ranked_match = re.match(r'pae_ranked_(\d+)\.json', file.name)
                 job_request_match = re.match(r'(.*)_job_request\.json', file.name)
 
                 if job_request_match:
@@ -460,6 +522,7 @@ if st.button("Analyze Models"):
                     if index not in model_files:
                         model_files[index] = {}
                     model_files[index]['model'] = file
+                    model_files[index]['format'] = 'af3'
                     if not base_name:
                         base_name = model_base_name
                 if summary_match:
@@ -468,6 +531,7 @@ if st.button("Analyze Models"):
                     if index not in model_files:
                         model_files[index] = {}
                     model_files[index]['summary'] = file
+                    model_files[index]['format'] = 'af3'
                     if not base_name:
                         base_name = summary_base_name
                 if full_data_match:
@@ -476,8 +540,27 @@ if st.button("Analyze Models"):
                     if index not in model_files:
                         model_files[index] = {}
                     model_files[index]['full_data'] = file
+                    model_files[index]['format'] = 'af3'
                     if not base_name:
                         base_name = full_data_base_name
+                if af2_model_match:
+                    index = af2_model_match.group(1)
+                    if index not in model_files:
+                        model_files[index] = {}
+                    model_files[index]['model'] = file
+                    model_files[index].setdefault('format', 'af2')
+                if af2_pae_match:
+                    index = af2_pae_match.group(1)
+                    if index not in model_files:
+                        model_files[index] = {}
+                    model_files[index]['full_data'] = file
+                    model_files[index].setdefault('format', 'af2')
+                if af2_pae_ranked_match:
+                    index = af2_pae_ranked_match.group(1)
+                    if index not in model_files:
+                        model_files[index] = {}
+                    model_files[index]['full_data'] = file
+                    model_files[index].setdefault('format', 'af2')
 
             if model_files:
                 # Create a consolidated summary table for all models
@@ -490,7 +573,7 @@ if st.button("Analyze Models"):
                     summary_file = file_set.get('summary')
 
                     if summary_file:
-                        summary_data = extract_data(summary_file)
+                        summary_data = extract_data(summary_file) if summary_file else None
                         # Collect summary information for all models
                         model_summary_df = {
                             'Model Name': model_name,
@@ -502,7 +585,7 @@ if st.button("Analyze Models"):
                             'Ranking Score': summary_data.get('ranking_score', 'N/A')
                         }
                         all_models_summary.append(model_summary_df)
-                    else:
+                    elif file_set.get('format', 'af3') == 'af3':
                         st.error(f"Missing summary file for {model_name}.")
 
                 # Display consolidated summary before individual models
@@ -519,11 +602,11 @@ if st.button("Analyze Models"):
                     full_data_file = file_set.get('full_data')
                     summary_file = file_set.get('summary')
 
-                    if cif_file and full_data_file and summary_file:
+                    if cif_file and full_data_file:
                         full_data = extract_data(full_data_file)
-                        summary_data = extract_data(summary_file)
+                        summary_data = extract_data(summary_file) if summary_file else None
 
-                        if full_data and summary_data:
+                        if full_data:
                             st.write(f"## {model_name}")
                             # Display 3D model and PAE heatmap side by side
                             col1, col2 = st.columns([1, 1], gap="medium")
@@ -531,12 +614,13 @@ if st.button("Analyze Models"):
                                 visualize_structure_with_molstar(cif_file)
 
                             with col2:
-                                pae_matrix = full_data.get('pae', None)
+                                pae_matrix = extract_pae_matrix(full_data)
                                 if pae_matrix is not None:
                                     plot_pae_heatmap(pae_matrix, model_name)
 
-                            # Display ptm and ipTM averages and ipTM matrix
-                            display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
+                            # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
+                            if summary_data:
+                                display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
                         else:
                             st.error(f"Missing or invalid data for {model_name}.")
                     else:
@@ -576,7 +660,7 @@ if st.button("Analyze Models"):
                         summary_file = file_set.get('summary')
 
                         if summary_file:
-                            summary_data = extract_data(summary_file)
+                            summary_data = extract_data(summary_file) if summary_file else None
                             # Collect summary information for all models
                             model_summary_df = {
                                 'Model Name': model_name,
@@ -588,7 +672,7 @@ if st.button("Analyze Models"):
                                 'Ranking Score': summary_data.get('ranking_score', 'N/A')
                             }
                             all_models_summary.append(model_summary_df)
-                        else:
+                        elif file_set.get('format', 'af3') == 'af3':
                             st.error(f"Missing summary file for {model_name}.")
 
                     # Display consolidated summary before individual models
@@ -605,10 +689,10 @@ if st.button("Analyze Models"):
                         full_data_file = file_set.get('full_data')
                         summary_file = file_set.get('summary')
 
-                        if cif_file and full_data_file and summary_file:
+                        if cif_file and full_data_file:
                             full_data = extract_data(full_data_file)
-                            summary_data = extract_data(summary_file)
-                            if full_data and summary_data:
+                            summary_data = extract_data(summary_file) if summary_file else None
+                            if full_data:
                                 st.write(f"## {model_name}")
                                 # Display 3D model and PAE heatmap side by side
                                 col1, col2 = st.columns([1, 1], gap="medium")
@@ -616,12 +700,13 @@ if st.button("Analyze Models"):
                                     visualize_structure_with_molstar(cif_file)
 
                                 with col2:
-                                    pae_matrix = full_data.get('pae', None)
+                                    pae_matrix = extract_pae_matrix(full_data)
                                     if pae_matrix is not None:
                                         plot_pae_heatmap(pae_matrix, model_name)
 
-                                # Display ptm and ipTM averages and ipTM matrix
-                                display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
+                                # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
+                                if summary_data:
+                                    display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
                         else:
                             st.error(f"Missing required files for {model_name}.")
                 else:
