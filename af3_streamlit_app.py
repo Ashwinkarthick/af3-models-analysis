@@ -4,17 +4,14 @@ import json
 import numpy as np
 import pandas as pd
 import zipfile
-import shutil
-import seaborn as sns
-import matplotlib.pyplot as plt
 import streamlit as st
-import io
-from PIL import Image
 import tempfile
 import shlex
-import plotly.express as px
 import plotly.graph_objects as go
-import streamlit.components.v1 as components
+try:
+    from streamlit_molstar import st_molstar
+except ImportError:
+    st_molstar = None
 
 # Function to load JSON data from a file or file object
 def extract_data(file_or_path):
@@ -38,15 +35,25 @@ def extract_pae_matrix(json_data):
     if json_data is None:
         return None
 
+    # Some AF2 exports store PAE directly as a numeric 2D array.
+    try:
+        direct_matrix = np.array(json_data, dtype=float)
+        if direct_matrix.ndim == 2 and direct_matrix.size > 0:
+            return direct_matrix
+    except (TypeError, ValueError):
+        pass
+
     if isinstance(json_data, dict):
         if 'pae' in json_data:
-            return np.array(json_data['pae'])
+            return np.array(json_data['pae'], dtype=float)
         if 'predicted_aligned_error' in json_data:
-            return np.array(json_data['predicted_aligned_error'])
+            return np.array(json_data['predicted_aligned_error'], dtype=float)
         if all(key in json_data for key in ('residue1', 'residue2', 'distance')):
             residue1 = np.array(json_data['residue1'], dtype=int)
             residue2 = np.array(json_data['residue2'], dtype=int)
             distance = np.array(json_data['distance'], dtype=float)
+            if residue1.size == 0 or residue2.size == 0:
+                return None
             size = max(residue1.max(), residue2.max())
             matrix = np.full((size, size), np.nan)
             matrix[residue1 - 1, residue2 - 1] = distance
@@ -55,11 +62,15 @@ def extract_pae_matrix(json_data):
     if isinstance(json_data, list) and len(json_data) > 0 and isinstance(json_data[0], dict):
         first_item = json_data[0]
         if 'predicted_aligned_error' in first_item:
-            return np.array(first_item['predicted_aligned_error'])
+            return np.array(first_item['predicted_aligned_error'], dtype=float)
+        if 'pae' in first_item:
+            return np.array(first_item['pae'], dtype=float)
         if all(key in first_item for key in ('residue1', 'residue2', 'distance')):
             residue1 = np.array(first_item['residue1'], dtype=int)
             residue2 = np.array(first_item['residue2'], dtype=int)
             distance = np.array(first_item['distance'], dtype=float)
+            if residue1.size == 0 or residue2.size == 0:
+                return None
             size = max(residue1.max(), residue2.max())
             matrix = np.full((size, size), np.nan)
             matrix[residue1 - 1, residue2 - 1] = distance
@@ -84,11 +95,74 @@ def calculate_chain_lengths(token_res_ids):
     chain_lengths.append(current_chain_length)
     return chain_lengths
 
+
+def chain_label_from_value(value):
+    # Normalize chain IDs so downstream viewer selection can target chains reliably.
+    if isinstance(value, (int, np.integer)):
+        chain_num = int(value)
+        if 1 <= chain_num <= 26:
+            return chr(64 + chain_num)
+        if 0 <= chain_num <= 25:
+            return chr(65 + chain_num)
+        return str(chain_num)
+
+    text = str(value)
+    if text.isdigit():
+        chain_num = int(text)
+        if 1 <= chain_num <= 26:
+            return chr(64 + chain_num)
+        if 0 <= chain_num <= 25:
+            return chr(65 + chain_num)
+    return text
+
+
+def build_residue_index_from_full_data(full_data):
+    if not isinstance(full_data, dict):
+        return []
+
+    token_res_ids = full_data.get('token_res_ids')
+    if not token_res_ids or not isinstance(token_res_ids, list):
+        return []
+
+    token_chain_ids = full_data.get('token_chain_ids')
+    residue_index = []
+
+    if isinstance(token_chain_ids, list) and len(token_chain_ids) == len(token_res_ids):
+        for chain_id, res_id in zip(token_chain_ids, token_res_ids):
+            residue_index.append((chain_label_from_value(chain_id), str(res_id)))
+        return residue_index
+
+    # Fallback for files that only expose token_res_ids: infer chain boundaries on index reset.
+    chain_counter = 0
+    prev_res = None
+    for res_id in token_res_ids:
+        try:
+            curr_res = int(res_id)
+        except (TypeError, ValueError):
+            curr_res = None
+
+        if prev_res is not None and curr_res is not None and curr_res <= prev_res:
+            chain_counter += 1
+
+        chain_label = chr(65 + (chain_counter % 26))
+        residue_index.append((chain_label, str(res_id)))
+
+        if curr_res is not None:
+            prev_res = curr_res
+
+    return residue_index
+
 # Function to plot PAE heatmap and capture interactive residue selection
 def plot_pae_heatmap(pae_matrix, model_name, plot_key, selected_pair=None):
     num_residues = len(pae_matrix)
     cell_size = 20
     fig_height = min(num_residues * cell_size, 800)
+    finite_values = pae_matrix[np.isfinite(pae_matrix)]
+    if finite_values.size:
+        zmin = float(finite_values.min())
+        zmax = float(finite_values.max())
+    else:
+        zmin, zmax = 0.0, 1.0
 
     fig = go.Figure(
         data=go.Heatmap(
@@ -102,8 +176,8 @@ def plot_pae_heatmap(pae_matrix, model_name, plot_key, selected_pair=None):
                 thickness=15,
                 len=0.7,
             ),
-            zmin=np.nanmin(pae_matrix),
-            zmax=np.nanmax(pae_matrix),
+            zmin=zmin,
+            zmax=zmax,
             showscale=True,
         )
     )
@@ -141,19 +215,35 @@ def plot_pae_heatmap(pae_matrix, model_name, plot_key, selected_pair=None):
 
     event = st.plotly_chart(
         fig,
-        width="stretch",
+        width='stretch',
         key=plot_key,
         on_select='rerun',
         selection_mode='points',
     )
 
     try:
-        points = event.get('selection', {}).get('points', []) if isinstance(event, dict) else []
+        if hasattr(event, 'selection'):
+            points = getattr(event.selection, 'points', [])
+        elif isinstance(event, dict):
+            points = event.get('selection', {}).get('points', [])
+        else:
+            points = []
+
         if points:
-            point = points[-1]
-            x = int(round(point.get('x')))
-            y = int(round(point.get('y')))
-            return (x, y)
+            selected_points = []
+            for point in points:
+                x_val = point.get('x') if isinstance(point, dict) else getattr(point, 'x')
+                y_val = point.get('y') if isinstance(point, dict) else getattr(point, 'y')
+                if x_val is None or y_val is None:
+                    continue
+                selected_points.append((int(round(x_val)), int(round(y_val))))
+
+            st.session_state[f"{plot_key}_selected_points"] = selected_points
+            if selected_points:
+                x, y = selected_points[-1]
+                return (x, y)
+
+        st.session_state[f"{plot_key}_selected_points"] = []
     except Exception:
         pass
 
@@ -217,40 +307,78 @@ def build_cif_residue_index(cif_text):
 
 
 # Function to create a 3D visualization using Mol* with optional residue-selection hints
-def visualize_structure_with_molstar(cif_file_or_path, selected_pair=None, viewer_key='viewer'):
-    residue_index = []
+def visualize_structure_with_molstar(cif_file_or_path, selected_pair=None, viewer_key='viewer', residue_index=None):
+    residue_index = residue_index or []
+    cif_text = None
+    tmp_file_path = None
+
+    if st_molstar is None:
+        st.error("streamlit_molstar is not installed. Install dependencies from requirements.txt.")
+        return
+
     if isinstance(cif_file_or_path, str):
         try:
-            with open(cif_file_or_path, 'r', encoding='utf-8') as f:
-                residue_index = build_cif_residue_index(f.read())
+            with open(cif_file_or_path, 'r', encoding='utf-8', errors='replace') as f:
+                cif_text = f.read()
+            if not residue_index:
+                residue_index = build_cif_residue_index(cif_text)
         except Exception:
-            residue_index = []
-        st_molstar(cif_file_or_path, height='600px', key=f'molstar_{viewer_key}')
+            if not residue_index:
+                residue_index = []
     else:
-        tmp_file_path = None
         try:
             content_bytes = cif_file_or_path.read()
             cif_file_or_path.seek(0)
             try:
-                residue_index = build_cif_residue_index(content_bytes.decode('utf-8'))
+                cif_text = content_bytes.decode('utf-8')
+                if not residue_index:
+                    residue_index = build_cif_residue_index(cif_text)
             except Exception:
+                if not residue_index:
+                    residue_index = []
+                cif_text = None
+        except Exception:
+            if not residue_index:
                 residue_index = []
+            cif_text = None
+
+    highlighted_residues = []
+    selection_indices = set()
+    selected_points = st.session_state.get(f"pae_plot_{viewer_key}_selected_points", [])
+    if selected_points and residue_index:
+        for x_idx, y_idx in selected_points:
+            selection_indices.add(x_idx + 1)
+            selection_indices.add(y_idx + 1)
+    elif selected_pair and residue_index:
+        selection_indices.add(selected_pair[0] + 1)
+        selection_indices.add(selected_pair[1] + 1)
+
+    for idx in sorted(selection_indices):
+        if 1 <= idx <= len(residue_index):
+            highlighted_residues.append(residue_index[idx - 1])
+
+    try:
+        if isinstance(cif_file_or_path, str):
+            st_molstar(cif_file_or_path, height='600px', key=f'molstar_{viewer_key}')
+        elif cif_text:
             with tempfile.NamedTemporaryFile(suffix='.cif', delete=False) as tmp_file:
-                tmp_file.write(content_bytes)
+                tmp_file.write(cif_text.encode('utf-8'))
                 tmp_file_path = tmp_file.name
             st_molstar(tmp_file_path, height='600px', key=f'molstar_{viewer_key}')
-        finally:
-            if tmp_file_path and os.path.exists(tmp_file_path):
-                os.remove(tmp_file_path)
+        else:
+            st.error("Could not render CIF content in the 3D viewer.")
+    finally:
+        if tmp_file_path and os.path.exists(tmp_file_path):
+            os.remove(tmp_file_path)
 
-    if selected_pair and residue_index:
+    if highlighted_residues:
         mapped = []
-        for idx in [selected_pair[0] + 1, selected_pair[1] + 1]:
-            if 1 <= idx <= len(residue_index):
-                chain, resi = residue_index[idx - 1]
-                mapped.append(f"{chain}:{resi}")
+        for chain, resi in highlighted_residues:
+            mapped.append(f"{chain}:{resi}")
         if mapped:
             st.caption(f"Selected residues in structure order: {', '.join(mapped)}")
+    elif selected_pair:
+        st.caption("Residue mapping unavailable for this model (no token/CIF residue index found).")
 # Function to display ptm and ipTM averages and ipTM matrix
 def display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name):
     chain_ptm = summary_data.get('chain_ptm', [])
@@ -523,6 +651,7 @@ if st.button("Analyze Models"):
                     summary_data = extract_data(summary_file) if summary_file else None
                     if full_data:
                         st.write(f"## {model_name}")
+                        residue_index = build_residue_index_from_full_data(full_data)
                         # Display 3D model and PAE heatmap side by side with linked selection
                         pae_matrix = extract_pae_matrix(full_data)
                         if pae_matrix is not None:
@@ -538,7 +667,14 @@ if st.button("Analyze Models"):
                                     st.caption(f"Selected PAE cell: aligned residue {selected_pair[1] + 1}, scored residue {selected_pair[0] + 1}")
 
                             with cols[0]:
-                                visualize_structure_with_molstar(cif_file, selected_pair=selected_pair, viewer_key=model_name)
+                                visualize_structure_with_molstar(
+                                    cif_file,
+                                    selected_pair=selected_pair,
+                                    viewer_key=model_name,
+                                    residue_index=residue_index,
+                                )
+                        else:
+                            st.warning(f"Could not parse a PAE matrix for {model_name}. Check the uploaded/full_data JSON format.")
 
                         # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
                         if summary_data:
@@ -662,6 +798,7 @@ if st.button("Analyze Models"):
 
                         if full_data:
                             st.write(f"## {model_name}")
+                            residue_index = build_residue_index_from_full_data(full_data)
                             # Display 3D model and PAE heatmap side by side with linked selection
                             pae_matrix = extract_pae_matrix(full_data)
                             if pae_matrix is not None:
@@ -677,7 +814,14 @@ if st.button("Analyze Models"):
                                         st.caption(f"Selected PAE cell: aligned residue {selected_pair[1] + 1}, scored residue {selected_pair[0] + 1}")
 
                                 with cols[0]:
-                                    visualize_structure_with_molstar(cif_file, selected_pair=selected_pair, viewer_key=model_name)
+                                    visualize_structure_with_molstar(
+                                        cif_file,
+                                        selected_pair=selected_pair,
+                                        viewer_key=model_name,
+                                        residue_index=residue_index,
+                                    )
+                            else:
+                                st.warning(f"Could not parse a PAE matrix for {model_name}. Check the uploaded/full_data JSON format.")
 
                             # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
                             if summary_data:
@@ -755,6 +899,7 @@ if st.button("Analyze Models"):
                             summary_data = extract_data(summary_file) if summary_file else None
                             if full_data:
                                 st.write(f"## {model_name}")
+                                residue_index = build_residue_index_from_full_data(full_data)
                                 # Display 3D model and PAE heatmap side by side with linked selection
                                 pae_matrix = extract_pae_matrix(full_data)
                                 if pae_matrix is not None:
@@ -770,7 +915,14 @@ if st.button("Analyze Models"):
                                             st.caption(f"Selected PAE cell: aligned residue {selected_pair[1] + 1}, scored residue {selected_pair[0] + 1}")
 
                                     with cols[0]:
-                                        visualize_structure_with_molstar(cif_file, selected_pair=selected_pair, viewer_key=model_name)
+                                        visualize_structure_with_molstar(
+                                            cif_file,
+                                            selected_pair=selected_pair,
+                                            viewer_key=model_name,
+                                            residue_index=residue_index,
+                                        )
+                                else:
+                                    st.warning(f"Could not parse a PAE matrix for {model_name}. Check the uploaded/full_data JSON format.")
 
                                 # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
                                 if summary_data:
