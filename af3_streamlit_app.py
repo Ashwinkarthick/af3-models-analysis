@@ -141,7 +141,7 @@ def plot_pae_heatmap(pae_matrix, model_name, plot_key, selected_pair=None):
 
     event = st.plotly_chart(
         fig,
-        use_container_width=True,
+        width="stretch",
         key=plot_key,
         on_select='rerun',
         selection_mode='points',
@@ -253,7 +253,7 @@ def visualize_structure_with_molstar(cif_file_or_path, selected_pair=None, viewe
     </script>
     """
 
-    components.html(html, height=620, key=f"ngl_{viewer_key}_{selection_clause}")
+    components.html(html, height=620)
 # Function to create a 3D visualization using Mol*
 # Function to display ptm and ipTM averages and ipTM matrix
 def display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name):
@@ -399,10 +399,15 @@ if file_option == "Folder from Shared System":
             first_model = next(iter(models.values()))
             full_data_file = first_model.get('full_data')
             job_request_file = os.path.join(output_dir, f"{base_name}_job_request.json")
-            if os.path.exists(job_request_file):
+            missing_files = []
+            if not os.path.exists(job_request_file):
+                missing_files.append(f"{base_name}_job_request.json")
+            if not full_data_file:
+                missing_files.append(f"{base_name}_full_data_<index>.json")
+            if not missing_files:
                 display_sequence_info(job_request_file, full_data_file)
             else:
-                st.error(f"Job request file {base_name}_job_request.json not found.")
+                st.error(f"Missing required JSON files: {', '.join(missing_files)}")
 
 elif file_option == "Upload Files":
 
@@ -415,8 +420,13 @@ elif file_option == "Upload Files":
         else:
             job_request_file = next((file for file in uploaded_files if re.match(r'.*_job_request\.json', file.name)), None)
             full_data_file = next((file for file in uploaded_files if re.match(r'.*_full_data_\d+\.json', file.name)), None)
-            if not (job_request_file and full_data_file):
-                st.error("Missing required JSON files. Please upload all necessary files.")
+            missing_files = []
+            if not job_request_file:
+                missing_files.append("*_job_request.json")
+            if not full_data_file:
+                missing_files.append("*_full_data_<index>.json")
+            if missing_files:
+                st.error(f"Missing required JSON files: {', '.join(missing_files)}")
             else:
                 display_sequence_info(job_request_file, full_data_file)
 
@@ -453,10 +463,15 @@ elif file_option == "Upload ZIP Folder":
                         if job_request_file:
                             break
 
-                    if job_request_file and full_data_file:
+                    missing_files = []
+                    if not job_request_file:
+                        missing_files.append(f"{base_name}_job_request.json")
+                    if not full_data_file:
+                        missing_files.append(f"{base_name}_full_data_<index>.json")
+                    if not missing_files:
                         display_sequence_info(job_request_file, full_data_file)
                     else:
-                        st.error(f"Required JSON files not found in the ZIP archive.")
+                        st.error(f"Required JSON files not found in ZIP: {', '.join(missing_files)}")
                 else:
                     st.error("No models found in the ZIP file.")
 
