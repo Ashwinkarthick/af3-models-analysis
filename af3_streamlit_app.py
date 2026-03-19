@@ -11,6 +11,7 @@ import streamlit as st
 import io
 from PIL import Image
 import tempfile
+import shlex
 import plotly.express as px
 import plotly.graph_objects as go
 from streamlit_molstar import st_molstar
@@ -32,6 +33,40 @@ def extract_data(file_or_path):
         st.error(f"Error reading JSON file: {e}")
         return None
 
+# Helper function to extract PAE matrix from AF3 or AF2 style JSON
+def extract_pae_matrix(json_data):
+    if json_data is None:
+        return None
+
+    if isinstance(json_data, dict):
+        if 'pae' in json_data:
+            return np.array(json_data['pae'])
+        if 'predicted_aligned_error' in json_data:
+            return np.array(json_data['predicted_aligned_error'])
+        if all(key in json_data for key in ('residue1', 'residue2', 'distance')):
+            residue1 = np.array(json_data['residue1'], dtype=int)
+            residue2 = np.array(json_data['residue2'], dtype=int)
+            distance = np.array(json_data['distance'], dtype=float)
+            size = max(residue1.max(), residue2.max())
+            matrix = np.full((size, size), np.nan)
+            matrix[residue1 - 1, residue2 - 1] = distance
+            return matrix
+
+    if isinstance(json_data, list) and len(json_data) > 0 and isinstance(json_data[0], dict):
+        first_item = json_data[0]
+        if 'predicted_aligned_error' in first_item:
+            return np.array(first_item['predicted_aligned_error'])
+        if all(key in first_item for key in ('residue1', 'residue2', 'distance')):
+            residue1 = np.array(first_item['residue1'], dtype=int)
+            residue2 = np.array(first_item['residue2'], dtype=int)
+            distance = np.array(first_item['distance'], dtype=float)
+            size = max(residue1.max(), residue2.max())
+            matrix = np.full((size, size), np.nan)
+            matrix[residue1 - 1, residue2 - 1] = distance
+            return matrix
+
+    return None
+
 # Helper function to calculate chain lengths from token_res_ids
 def calculate_chain_lengths(token_res_ids):
     chain_lengths = []
@@ -49,142 +84,173 @@ def calculate_chain_lengths(token_res_ids):
     chain_lengths.append(current_chain_length)
     return chain_lengths
 
-# Function to plot PAE heatmap and reload it with specific pixel dimensions
-# def plot_pae_heatmap(pae_matrix, model_name):
-#     fig, ax = plt.subplots(figsize=(6, 6))  # Create the figure with default size
-
-#     cmap = sns.color_palette("Greens", as_cmap=True).reversed()
-
-#     sns.heatmap(pae_matrix, cmap=cmap, square=True, cbar_kws={
-#         'label': 'Expected Position Error (Å)',
-#         'orientation': 'horizontal',
-#         'pad': 0.15,
-#         'shrink': 0.65
-#     }, ax=ax)
-
-#     ax.set_xlabel("Scored Residue", fontsize=12)
-#     ax.set_ylabel("Aligned Residue", fontsize=12)
-
-#     ax.tick_params(axis='both', which='both', length=0)
-#     ax.set_xticks(np.arange(0, len(pae_matrix), max(1, len(pae_matrix) // 8)))
-#     ax.set_xticklabels(np.arange(1, len(pae_matrix) + 1, max(1, len(pae_matrix) // 8)))
-#     ax.set_yticks(np.arange(0, len(pae_matrix), max(1, len(pae_matrix) // 8)))
-#     ax.set_yticklabels(np.arange(1, len(pae_matrix) + 1, max(1, len(pae_matrix) // 8)))
-
-#     for _, spine in ax.spines.items():
-#         spine.set_visible(True)
-#         spine.set_color('black')
-#         spine.set_linewidth(1)
-
-#     cbar = ax.collections[0].colorbar
-#     cbar.outline.set_edgecolor('black')
-#     cbar.outline.set_linewidth(1)
-
-#     cbar.ax.tick_params(length=0)
-#     cbar.ax.set_aspect('auto')
-
-#     plt.title(f"{model_name} PAE Heatmap", fontsize=14)
-
-#     # Save the figure in memory as a BytesIO object
-#     buf = io.BytesIO()
-#     plt.savefig(buf, format="png", bbox_inches="tight")
-#     buf.seek(0)  # Move the buffer's position to the beginning
-
-#     # Reload the plot from memory and specify the pixel dimensions
-#     image = Image.open(buf)
-#     st.image(image, caption=f"{model_name} PAE Heatmap", use_column_width=True)
-
-#     buf.close()  # Close the buffer
-
-def plot_pae_heatmap(pae_matrix, model_name):
-    import plotly.graph_objects as go
-
+# Function to plot PAE heatmap and capture interactive residue selection
+def plot_pae_heatmap(pae_matrix, model_name, plot_key, selected_pair=None):
     num_residues = len(pae_matrix)
-    cell_size = 20  # pixels per cell; adjust as needed
-    fig_height = num_residues * cell_size
+    cell_size = 20
+    fig_height = min(num_residues * cell_size, 800)
 
-    # Set a maximum figure height to prevent the plot from becoming too tall
-    max_height = 800  # Maximum height in pixels; adjust as needed
-    if fig_height > max_height:
-        fig_height = max_height
-
-    # Create the heatmap trace
-    heatmap = go.Heatmap(
-        z=pae_matrix,
-        colorscale='Greens_r',
-        colorbar=dict(
-            title='Expected Position Error (Å)',
-            orientation='h',
-            x=0.5,
-            xanchor='center',
-            thickness=15,
-            len=0.7,
-        ),
-        zmin=np.min(pae_matrix),
-        zmax=np.max(pae_matrix),
-        showscale=True,
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=pae_matrix,
+            colorscale='Greens_r',
+            colorbar=dict(
+                title='Expected Position Error (Å)',
+                orientation='h',
+                x=0.5,
+                xanchor='center',
+                thickness=15,
+                len=0.7,
+            ),
+            zmin=np.nanmin(pae_matrix),
+            zmax=np.nanmax(pae_matrix),
+            showscale=True,
+        )
     )
 
-    # Create the figure
-    fig = go.Figure(data=heatmap)
+    if selected_pair:
+        x_idx, y_idx = selected_pair
+        fig.add_shape(
+            type='rect',
+            x0=x_idx - 0.5,
+            y0=y_idx - 0.5,
+            x1=x_idx + 0.5,
+            y1=y_idx + 0.5,
+            line=dict(color='red', width=2),
+        )
 
-    # Update axes to fix aspect ratio
-    fig.update_xaxes(
-        tickmode='linear',
-        tick0=0,
-        dtick=max(1, num_residues // 8),
-        showgrid=False,
-    )
-
+    fig.update_xaxes(tickmode='linear', tick0=0, dtick=max(1, num_residues // 8), showgrid=False)
     fig.update_yaxes(
         tickmode='linear',
         tick0=0,
         dtick=max(1, num_residues // 8),
         showgrid=False,
-        scaleanchor="x",   # Tie y-axis to x-axis
+        scaleanchor='x',
         scaleratio=1,
     )
-
-    # Update layout
     fig.update_layout(
         title=f"{model_name} PAE Heatmap",
-        xaxis_title="Scored Residue",
-        yaxis_title="Aligned Residue",
+        xaxis_title='Scored Residue',
+        yaxis_title='Aligned Residue',
         autosize=False,
         height=fig_height,
         margin=dict(l=50, r=50, t=50, b=50),
+        clickmode='event+select',
+        dragmode='select',
     )
 
-    # Display the figure in Streamlit
-    st.plotly_chart(fig, use_container_width=True)
+    event = st.plotly_chart(
+        fig,
+        width="stretch",
+        key=plot_key,
+        on_select='rerun',
+        selection_mode='points',
+    )
 
-# Function to create a 3D visualization using Mol*
-def visualize_structure_with_molstar(cif_file_or_path):
-    import tempfile
-    import os
+    try:
+        points = event.get('selection', {}).get('points', []) if isinstance(event, dict) else []
+        if points:
+            point = points[-1]
+            x = int(round(point.get('x')))
+            y = int(round(point.get('y')))
+            return (x, y)
+    except Exception:
+        pass
 
-    if isinstance(cif_file_or_path, str):
-        # If it's a file path, pass it directly to st_molstar
-        st.write(f"Loading CIF file from path: {cif_file_or_path}")
-        st_molstar(cif_file_or_path, height='600px')
-    else:
-        # If it's an uploaded file, write it to a temporary file and pass the path
-        st.write(f"Loading CIF file from uploaded file: {cif_file_or_path.name}")
+    return selected_pair
+
+
+# Function to parse residue mapping from CIF text
+def build_cif_residue_index(cif_text):
+    lines = cif_text.splitlines()
+    headers = []
+    data_lines = []
+    in_atom_loop = False
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == 'loop_':
+            local_headers = []
+            j = i + 1
+            while j < len(lines) and lines[j].strip().startswith('_atom_site.'):
+                local_headers.append(lines[j].strip())
+                j += 1
+            if local_headers:
+                headers = local_headers
+                k = j
+                while k < len(lines):
+                    row = lines[k].strip()
+                    if not row or row.startswith('#') or row.startswith('loop_') or row.startswith('_'):
+                        break
+                    data_lines.append(row)
+                    k += 1
+                in_atom_loop = True
+                break
+
+    if not in_atom_loop or not headers:
+        return []
+
+    header_index = {h: idx for idx, h in enumerate(headers)}
+    chain_col = header_index.get('_atom_site.auth_asym_id', header_index.get('_atom_site.label_asym_id'))
+    seq_col = header_index.get('_atom_site.auth_seq_id', header_index.get('_atom_site.label_seq_id'))
+
+    if chain_col is None or seq_col is None:
+        return []
+
+    residue_order = []
+    seen = set()
+    for row in data_lines:
         try:
-            # Read the content
-            content = cif_file_or_path.read()
-            # Write to temp file
-            with tempfile.NamedTemporaryFile(suffix=".cif", delete=False) as tmp_file:
-                tmp_file.write(content)
-                tmp_file_path = tmp_file.name
-            # Reset the file pointer
+            tokens = shlex.split(row)
+        except ValueError:
+            tokens = row.split()
+        if len(tokens) <= max(chain_col, seq_col):
+            continue
+        chain_id = tokens[chain_col]
+        seq_id = tokens[seq_col]
+        key = (chain_id, seq_id)
+        if key not in seen:
+            seen.add(key)
+            residue_order.append(key)
+
+    return residue_order
+
+
+# Function to create a 3D visualization using Mol* with optional residue-selection hints
+def visualize_structure_with_molstar(cif_file_or_path, selected_pair=None, viewer_key='viewer'):
+    residue_index = []
+    if isinstance(cif_file_or_path, str):
+        try:
+            with open(cif_file_or_path, 'r', encoding='utf-8') as f:
+                residue_index = build_cif_residue_index(f.read())
+        except Exception:
+            residue_index = []
+        st_molstar(cif_file_or_path, height='600px', key=f'molstar_{viewer_key}')
+    else:
+        tmp_file_path = None
+        try:
+            content_bytes = cif_file_or_path.read()
             cif_file_or_path.seek(0)
-            st_molstar(tmp_file_path, height='600px')
+            try:
+                residue_index = build_cif_residue_index(content_bytes.decode('utf-8'))
+            except Exception:
+                residue_index = []
+            with tempfile.NamedTemporaryFile(suffix='.cif', delete=False) as tmp_file:
+                tmp_file.write(content_bytes)
+                tmp_file_path = tmp_file.name
+            st_molstar(tmp_file_path, height='600px', key=f'molstar_{viewer_key}')
         finally:
-            # Clean up temporary file
-            if 'tmp_file_path' in locals() and os.path.exists(tmp_file_path):
+            if tmp_file_path and os.path.exists(tmp_file_path):
                 os.remove(tmp_file_path)
 
+    if selected_pair and residue_index:
+        mapped = []
+        for idx in [selected_pair[0] + 1, selected_pair[1] + 1]:
+            if 1 <= idx <= len(residue_index):
+                chain, resi = residue_index[idx - 1]
+                mapped.append(f"{chain}:{resi}")
+        if mapped:
+            st.caption(f"Selected residues in structure order: {', '.join(mapped)}")
 # Function to display ptm and ipTM averages and ipTM matrix
 def display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name):
     chain_ptm = summary_data.get('chain_ptm', [])
@@ -250,6 +316,9 @@ def scan_model_files(folder_path):
                 model_match = re.match(r'(.*)_model_(\d+)\.cif', file_name)
                 summary_match = re.match(r'(.*)_summary_confidences_(\d+)\.json', file_name)
                 full_data_match = re.match(r'(.*)_full_data_(\d+)\.json', file_name)
+                af2_model_match = re.match(r'ranked_(\d+)\.cif', file_name)
+                af2_pae_match = re.match(r'pae_model_\d+_.*_pred_(\d+)\.json', file_name)
+                af2_pae_ranked_match = re.match(r'pae_ranked_(\d+)\.json', file_name)
 
                 if model_match:
                     model_base_name = model_match.group(1)
@@ -257,6 +326,7 @@ def scan_model_files(folder_path):
                     if index not in models:
                         models[index] = {}
                     models[index]['model'] = os.path.join(root, file_name)
+                    models[index]['format'] = 'af3'
                     if not base_name:
                         base_name = model_base_name
                 if summary_match:
@@ -265,6 +335,7 @@ def scan_model_files(folder_path):
                     if index not in models:
                         models[index] = {}
                     models[index]['summary'] = os.path.join(root, file_name)
+                    models[index]['format'] = 'af3'
                     if not base_name:
                         base_name = summary_base_name
                 if full_data_match:
@@ -273,8 +344,27 @@ def scan_model_files(folder_path):
                     if index not in models:
                         models[index] = {}
                     models[index]['full_data'] = os.path.join(root, file_name)
+                    models[index]['format'] = 'af3'
                     if not base_name:
                         base_name = full_data_base_name
+                if af2_model_match:
+                    index = af2_model_match.group(1)
+                    if index not in models:
+                        models[index] = {}
+                    models[index]['model'] = os.path.join(root, file_name)
+                    models[index].setdefault('format', 'af2')
+                if af2_pae_match:
+                    index = af2_pae_match.group(1)
+                    if index not in models:
+                        models[index] = {}
+                    models[index]['full_data'] = os.path.join(root, file_name)
+                    models[index].setdefault('format', 'af2')
+                if af2_pae_ranked_match:
+                    index = af2_pae_ranked_match.group(1)
+                    if index not in models:
+                        models[index] = {}
+                    models[index]['full_data'] = os.path.join(root, file_name)
+                    models[index].setdefault('format', 'af2')
 
         return models, base_name
     except FileNotFoundError:
@@ -305,10 +395,15 @@ if file_option == "Folder from Shared System":
             first_model = next(iter(models.values()))
             full_data_file = first_model.get('full_data')
             job_request_file = os.path.join(output_dir, f"{base_name}_job_request.json")
-            if os.path.exists(job_request_file):
+            missing_files = []
+            if not os.path.exists(job_request_file):
+                missing_files.append(f"{base_name}_job_request.json")
+            if not full_data_file:
+                missing_files.append(f"{base_name}_full_data_<index>.json")
+            if not missing_files:
                 display_sequence_info(job_request_file, full_data_file)
             else:
-                st.error(f"Job request file {base_name}_job_request.json not found.")
+                st.error(f"Missing required JSON files: {', '.join(missing_files)}")
 
 elif file_option == "Upload Files":
 
@@ -321,8 +416,13 @@ elif file_option == "Upload Files":
         else:
             job_request_file = next((file for file in uploaded_files if re.match(r'.*_job_request\.json', file.name)), None)
             full_data_file = next((file for file in uploaded_files if re.match(r'.*_full_data_\d+\.json', file.name)), None)
-            if not (job_request_file and full_data_file):
-                st.error("Missing required JSON files. Please upload all necessary files.")
+            missing_files = []
+            if not job_request_file:
+                missing_files.append("*_job_request.json")
+            if not full_data_file:
+                missing_files.append("*_full_data_<index>.json")
+            if missing_files:
+                st.error(f"Missing required JSON files: {', '.join(missing_files)}")
             else:
                 display_sequence_info(job_request_file, full_data_file)
 
@@ -359,10 +459,15 @@ elif file_option == "Upload ZIP Folder":
                         if job_request_file:
                             break
 
-                    if job_request_file and full_data_file:
+                    missing_files = []
+                    if not job_request_file:
+                        missing_files.append(f"{base_name}_job_request.json")
+                    if not full_data_file:
+                        missing_files.append(f"{base_name}_full_data_<index>.json")
+                    if not missing_files:
                         display_sequence_info(job_request_file, full_data_file)
                     else:
-                        st.error(f"Required JSON files not found in the ZIP archive.")
+                        st.error(f"Required JSON files not found in ZIP: {', '.join(missing_files)}")
                 else:
                     st.error("No models found in the ZIP file.")
 
@@ -384,7 +489,7 @@ if st.button("Analyze Models"):
                 summary_file = file_set.get('summary')
 
                 if summary_file:
-                    summary_data = extract_data(summary_file)
+                    summary_data = extract_data(summary_file) if summary_file else None
                     # Collect summary information for all models
                     model_summary_df = {
                         'Model Name': model_name,
@@ -396,7 +501,7 @@ if st.button("Analyze Models"):
                         'Ranking Score': summary_data.get('ranking_score', 'N/A')
                     }
                     all_models_summary.append(model_summary_df)
-                else:
+                elif file_set.get('format', 'af3') == 'af3':
                     st.error(f"Missing summary file for {model_name}.")
 
             # Display consolidated summary before individual models
@@ -413,23 +518,31 @@ if st.button("Analyze Models"):
                 full_data_file = file_set.get('full_data')
                 summary_file = file_set.get('summary')
 
-                if cif_file and full_data_file and summary_file:
+                if cif_file and full_data_file:
                     full_data = extract_data(full_data_file)
-                    summary_data = extract_data(summary_file)
-                    if full_data and summary_data:
+                    summary_data = extract_data(summary_file) if summary_file else None
+                    if full_data:
                         st.write(f"## {model_name}")
-                        # Display 3D model and PAE heatmap side by side
-                        col1, col2 = st.columns([1, 1], gap="medium")  # Equal column widths
-                        with col1:
-                            visualize_structure_with_molstar(cif_file)
+                        # Display 3D model and PAE heatmap side by side with linked selection
+                        pae_matrix = extract_pae_matrix(full_data)
+                        if pae_matrix is not None:
+                            selection_state_key = f"selected_pair_{model_name}"
+                            plot_state_key = f"pae_plot_{model_name}"
+                            selected_pair = st.session_state.get(selection_state_key)
 
-                        with col2:
-                            pae_matrix = full_data.get('pae', None)
-                            if pae_matrix is not None:
-                                plot_pae_heatmap(pae_matrix, model_name)
+                            cols = st.columns([1, 1], gap="medium")  # Equal column widths
+                            with cols[1]:
+                                selected_pair = plot_pae_heatmap(pae_matrix, model_name, plot_state_key, selected_pair)
+                                st.session_state[selection_state_key] = selected_pair
+                                if selected_pair:
+                                    st.caption(f"Selected PAE cell: aligned residue {selected_pair[1] + 1}, scored residue {selected_pair[0] + 1}")
 
-                        # Display ptm and ipTM averages and ipTM matrix
-                        display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
+                            with cols[0]:
+                                visualize_structure_with_molstar(cif_file, selected_pair=selected_pair, viewer_key=model_name)
+
+                        # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
+                        if summary_data:
+                            display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
                     else:
                         st.error(f"Missing or invalid data for {model_name}.")
                 else:
@@ -449,6 +562,9 @@ if st.button("Analyze Models"):
                 model_match = re.match(r'(.*)_model_(\d+)\.cif', file.name)
                 summary_match = re.match(r'(.*)_summary_confidences_(\d+)\.json', file.name)
                 full_data_match = re.match(r'(.*)_full_data_(\d+)\.json', file.name)
+                af2_model_match = re.match(r'ranked_(\d+)\.cif', file.name)
+                af2_pae_match = re.match(r'pae_model_\d+_.*_pred_(\d+)\.json', file.name)
+                af2_pae_ranked_match = re.match(r'pae_ranked_(\d+)\.json', file.name)
                 job_request_match = re.match(r'(.*)_job_request\.json', file.name)
 
                 if job_request_match:
@@ -460,6 +576,7 @@ if st.button("Analyze Models"):
                     if index not in model_files:
                         model_files[index] = {}
                     model_files[index]['model'] = file
+                    model_files[index]['format'] = 'af3'
                     if not base_name:
                         base_name = model_base_name
                 if summary_match:
@@ -468,6 +585,7 @@ if st.button("Analyze Models"):
                     if index not in model_files:
                         model_files[index] = {}
                     model_files[index]['summary'] = file
+                    model_files[index]['format'] = 'af3'
                     if not base_name:
                         base_name = summary_base_name
                 if full_data_match:
@@ -476,8 +594,27 @@ if st.button("Analyze Models"):
                     if index not in model_files:
                         model_files[index] = {}
                     model_files[index]['full_data'] = file
+                    model_files[index]['format'] = 'af3'
                     if not base_name:
                         base_name = full_data_base_name
+                if af2_model_match:
+                    index = af2_model_match.group(1)
+                    if index not in model_files:
+                        model_files[index] = {}
+                    model_files[index]['model'] = file
+                    model_files[index].setdefault('format', 'af2')
+                if af2_pae_match:
+                    index = af2_pae_match.group(1)
+                    if index not in model_files:
+                        model_files[index] = {}
+                    model_files[index]['full_data'] = file
+                    model_files[index].setdefault('format', 'af2')
+                if af2_pae_ranked_match:
+                    index = af2_pae_ranked_match.group(1)
+                    if index not in model_files:
+                        model_files[index] = {}
+                    model_files[index]['full_data'] = file
+                    model_files[index].setdefault('format', 'af2')
 
             if model_files:
                 # Create a consolidated summary table for all models
@@ -490,7 +627,7 @@ if st.button("Analyze Models"):
                     summary_file = file_set.get('summary')
 
                     if summary_file:
-                        summary_data = extract_data(summary_file)
+                        summary_data = extract_data(summary_file) if summary_file else None
                         # Collect summary information for all models
                         model_summary_df = {
                             'Model Name': model_name,
@@ -502,7 +639,7 @@ if st.button("Analyze Models"):
                             'Ranking Score': summary_data.get('ranking_score', 'N/A')
                         }
                         all_models_summary.append(model_summary_df)
-                    else:
+                    elif file_set.get('format', 'af3') == 'af3':
                         st.error(f"Missing summary file for {model_name}.")
 
                 # Display consolidated summary before individual models
@@ -519,24 +656,32 @@ if st.button("Analyze Models"):
                     full_data_file = file_set.get('full_data')
                     summary_file = file_set.get('summary')
 
-                    if cif_file and full_data_file and summary_file:
+                    if cif_file and full_data_file:
                         full_data = extract_data(full_data_file)
-                        summary_data = extract_data(summary_file)
+                        summary_data = extract_data(summary_file) if summary_file else None
 
-                        if full_data and summary_data:
+                        if full_data:
                             st.write(f"## {model_name}")
-                            # Display 3D model and PAE heatmap side by side
-                            col1, col2 = st.columns([1, 1], gap="medium")
-                            with col1:
-                                visualize_structure_with_molstar(cif_file)
+                            # Display 3D model and PAE heatmap side by side with linked selection
+                            pae_matrix = extract_pae_matrix(full_data)
+                            if pae_matrix is not None:
+                                selection_state_key = f"selected_pair_{model_name}"
+                                plot_state_key = f"pae_plot_{model_name}"
+                                selected_pair = st.session_state.get(selection_state_key)
 
-                            with col2:
-                                pae_matrix = full_data.get('pae', None)
-                                if pae_matrix is not None:
-                                    plot_pae_heatmap(pae_matrix, model_name)
+                                cols = st.columns([1, 1], gap="medium")
+                                with cols[1]:
+                                    selected_pair = plot_pae_heatmap(pae_matrix, model_name, plot_state_key, selected_pair)
+                                    st.session_state[selection_state_key] = selected_pair
+                                    if selected_pair:
+                                        st.caption(f"Selected PAE cell: aligned residue {selected_pair[1] + 1}, scored residue {selected_pair[0] + 1}")
 
-                            # Display ptm and ipTM averages and ipTM matrix
-                            display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
+                                with cols[0]:
+                                    visualize_structure_with_molstar(cif_file, selected_pair=selected_pair, viewer_key=model_name)
+
+                            # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
+                            if summary_data:
+                                display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
                         else:
                             st.error(f"Missing or invalid data for {model_name}.")
                     else:
@@ -576,7 +721,7 @@ if st.button("Analyze Models"):
                         summary_file = file_set.get('summary')
 
                         if summary_file:
-                            summary_data = extract_data(summary_file)
+                            summary_data = extract_data(summary_file) if summary_file else None
                             # Collect summary information for all models
                             model_summary_df = {
                                 'Model Name': model_name,
@@ -588,7 +733,7 @@ if st.button("Analyze Models"):
                                 'Ranking Score': summary_data.get('ranking_score', 'N/A')
                             }
                             all_models_summary.append(model_summary_df)
-                        else:
+                        elif file_set.get('format', 'af3') == 'af3':
                             st.error(f"Missing summary file for {model_name}.")
 
                     # Display consolidated summary before individual models
@@ -605,23 +750,31 @@ if st.button("Analyze Models"):
                         full_data_file = file_set.get('full_data')
                         summary_file = file_set.get('summary')
 
-                        if cif_file and full_data_file and summary_file:
+                        if cif_file and full_data_file:
                             full_data = extract_data(full_data_file)
-                            summary_data = extract_data(summary_file)
-                            if full_data and summary_data:
+                            summary_data = extract_data(summary_file) if summary_file else None
+                            if full_data:
                                 st.write(f"## {model_name}")
-                                # Display 3D model and PAE heatmap side by side
-                                col1, col2 = st.columns([1, 1], gap="medium")
-                                with col1:
-                                    visualize_structure_with_molstar(cif_file)
+                                # Display 3D model and PAE heatmap side by side with linked selection
+                                pae_matrix = extract_pae_matrix(full_data)
+                                if pae_matrix is not None:
+                                    selection_state_key = f"selected_pair_{model_name}"
+                                    plot_state_key = f"pae_plot_{model_name}"
+                                    selected_pair = st.session_state.get(selection_state_key)
 
-                                with col2:
-                                    pae_matrix = full_data.get('pae', None)
-                                    if pae_matrix is not None:
-                                        plot_pae_heatmap(pae_matrix, model_name)
+                                    cols = st.columns([1, 1], gap="medium")
+                                    with cols[1]:
+                                        selected_pair = plot_pae_heatmap(pae_matrix, model_name, plot_state_key, selected_pair)
+                                        st.session_state[selection_state_key] = selected_pair
+                                        if selected_pair:
+                                            st.caption(f"Selected PAE cell: aligned residue {selected_pair[1] + 1}, scored residue {selected_pair[0] + 1}")
 
-                                # Display ptm and ipTM averages and ipTM matrix
-                                display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
+                                    with cols[0]:
+                                        visualize_structure_with_molstar(cif_file, selected_pair=selected_pair, viewer_key=model_name)
+
+                                # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
+                                if summary_data:
+                                    display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name)
                         else:
                             st.error(f"Missing required files for {model_name}.")
                 else:
