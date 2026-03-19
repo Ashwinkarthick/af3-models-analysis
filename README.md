@@ -1,11 +1,11 @@
-# Streamlit App
+# Alphafold data visualisation
 
-This repository contains a Streamlit application designed for visualizing and analyzing data. The app provides functionality for plotting, molecular structure visualization, and data exploration.
+This repository contains a Streamlit application designed for visualising and analysing Alphafold data. The app provides functionality for plotting, molecular structure visualisation, and data exploration.
 
 ## Features
 
-- Data visualization with Plotly and Seaborn
-- Molecular visualization using streamlit_molstar
+- Data visualisation with Plotly and Seaborn
+- Molecular visualisation using streamlit_molstar
 - Support for JSON data extraction and processing
 
 ## Installation
