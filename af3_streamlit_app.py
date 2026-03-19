@@ -14,7 +14,7 @@ import tempfile
 import shlex
 import plotly.express as px
 import plotly.graph_objects as go
-from streamlit_molstar import st_molstar
+import streamlit.components.v1 as components
 
 # Function to load JSON data from a file or file object
 def extract_data(file_or_path):
