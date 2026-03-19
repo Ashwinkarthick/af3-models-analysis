@@ -1,8 +1,5 @@
 numpy
 pandas
-seaborn
-matplotlib
 streamlit>=1.55.0
-Pillow
 plotly
 streamlit_molstar
