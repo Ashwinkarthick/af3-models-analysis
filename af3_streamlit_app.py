@@ -251,7 +251,6 @@ def visualize_structure_with_molstar(cif_file_or_path, selected_pair=None, viewe
                 mapped.append(f"{chain}:{resi}")
         if mapped:
             st.caption(f"Selected residues in structure order: {', '.join(mapped)}")
-# Function to create a 3D visualization using Mol*
 # Function to display ptm and ipTM averages and ipTM matrix
 def display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name):
     chain_ptm = summary_data.get('chain_ptm', [])
