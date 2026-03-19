@@ -519,17 +519,15 @@ if st.button("Analyze Models"):
                             plot_state_key = f"pae_plot_{model_name}"
                             selected_pair = st.session_state.get(selection_state_key)
 
-                            col1, col2 = st.columns([1, 1], gap="medium")  # Equal column widths
-                            with col2:
+                            cols = st.columns([1, 1], gap="medium")  # Equal column widths
+                            with cols[1]:
                                 selected_pair = plot_pae_heatmap(pae_matrix, model_name, plot_state_key, selected_pair)
                                 st.session_state[selection_state_key] = selected_pair
                                 if selected_pair:
                                     st.caption(f"Selected PAE cell: aligned residue {selected_pair[1] + 1}, scored residue {selected_pair[0] + 1}")
 
-                        with col2:
-                            pae_matrix = extract_pae_matrix(full_data)
-                            if pae_matrix is not None:
-                                plot_pae_heatmap(pae_matrix, model_name)
+                            with cols[0]:
+                                visualize_structure_with_molstar(cif_file, selected_pair=selected_pair, viewer_key=model_name)
 
                         # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
                         if summary_data:
@@ -660,10 +658,15 @@ if st.button("Analyze Models"):
                                 plot_state_key = f"pae_plot_{model_name}"
                                 selected_pair = st.session_state.get(selection_state_key)
 
-                            with col2:
-                                pae_matrix = extract_pae_matrix(full_data)
-                                if pae_matrix is not None:
-                                    plot_pae_heatmap(pae_matrix, model_name)
+                                cols = st.columns([1, 1], gap="medium")
+                                with cols[1]:
+                                    selected_pair = plot_pae_heatmap(pae_matrix, model_name, plot_state_key, selected_pair)
+                                    st.session_state[selection_state_key] = selected_pair
+                                    if selected_pair:
+                                        st.caption(f"Selected PAE cell: aligned residue {selected_pair[1] + 1}, scored residue {selected_pair[0] + 1}")
+
+                                with cols[0]:
+                                    visualize_structure_with_molstar(cif_file, selected_pair=selected_pair, viewer_key=model_name)
 
                             # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
                             if summary_data:
@@ -741,15 +744,22 @@ if st.button("Analyze Models"):
                             summary_data = extract_data(summary_file) if summary_file else None
                             if full_data:
                                 st.write(f"## {model_name}")
-                                # Display 3D model and PAE heatmap side by side
-                                col1, col2 = st.columns([1, 1], gap="medium")
-                                with col1:
-                                    visualize_structure_with_molstar(cif_file)
+                                # Display 3D model and PAE heatmap side by side with linked selection
+                                pae_matrix = extract_pae_matrix(full_data)
+                                if pae_matrix is not None:
+                                    selection_state_key = f"selected_pair_{model_name}"
+                                    plot_state_key = f"pae_plot_{model_name}"
+                                    selected_pair = st.session_state.get(selection_state_key)
 
-                                with col2:
-                                    pae_matrix = extract_pae_matrix(full_data)
-                                    if pae_matrix is not None:
-                                        plot_pae_heatmap(pae_matrix, model_name)
+                                    cols = st.columns([1, 1], gap="medium")
+                                    with cols[1]:
+                                        selected_pair = plot_pae_heatmap(pae_matrix, model_name, plot_state_key, selected_pair)
+                                        st.session_state[selection_state_key] = selected_pair
+                                        if selected_pair:
+                                            st.caption(f"Selected PAE cell: aligned residue {selected_pair[1] + 1}, scored residue {selected_pair[0] + 1}")
+
+                                    with cols[0]:
+                                        visualize_structure_with_molstar(cif_file, selected_pair=selected_pair, viewer_key=model_name)
 
                                 # Display ptm and ipTM averages and ipTM matrix (AF3 summary files)
                                 if summary_data:
