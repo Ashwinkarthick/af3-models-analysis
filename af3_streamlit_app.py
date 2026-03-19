@@ -216,44 +216,41 @@ def build_cif_residue_index(cif_text):
     return residue_order
 
 
-# Function to create a 3D visualization using CIF content and optional highlighted residues
+# Function to create a 3D visualization using Mol* with optional residue-selection hints
 def visualize_structure_with_molstar(cif_file_or_path, selected_pair=None, viewer_key='viewer'):
+    residue_index = []
     if isinstance(cif_file_or_path, str):
-        with open(cif_file_or_path, 'r', encoding='utf-8') as f:
-            cif_text = f.read()
+        try:
+            with open(cif_file_or_path, 'r', encoding='utf-8') as f:
+                residue_index = build_cif_residue_index(f.read())
+        except Exception:
+            residue_index = []
+        st_molstar(cif_file_or_path, height='600px', key=f'molstar_{viewer_key}')
     else:
-        cif_text = cif_file_or_path.getvalue().decode('utf-8')
+        tmp_file_path = None
+        try:
+            content_bytes = cif_file_or_path.read()
+            cif_file_or_path.seek(0)
+            try:
+                residue_index = build_cif_residue_index(content_bytes.decode('utf-8'))
+            except Exception:
+                residue_index = []
+            with tempfile.NamedTemporaryFile(suffix='.cif', delete=False) as tmp_file:
+                tmp_file.write(content_bytes)
+                tmp_file_path = tmp_file.name
+            st_molstar(tmp_file_path, height='600px', key=f'molstar_{viewer_key}')
+        finally:
+            if tmp_file_path and os.path.exists(tmp_file_path):
+                os.remove(tmp_file_path)
 
-    residue_index = build_cif_residue_index(cif_text)
-    selected_residues = []
     if selected_pair and residue_index:
+        mapped = []
         for idx in [selected_pair[0] + 1, selected_pair[1] + 1]:
             if 1 <= idx <= len(residue_index):
-                selected_residues.append(residue_index[idx - 1])
-
-    selection_clause = ' or '.join([f"(:{chain} and {resi})" for chain, resi in selected_residues]) if selected_residues else ''
-
-    html = f"""
-    <div id="ngl-viewer-{viewer_key}" style="width: 100%; height: 600px;"></div>
-    <script src="https://unpkg.com/ngl@2.0.0-dev.37/dist/ngl.js"></script>
-    <script>
-      const stage = new NGL.Stage('ngl-viewer-{viewer_key}', {{ backgroundColor: 'white' }});
-      const blob = new Blob([{json.dumps(cif_text)}], {{ type: 'text/plain' }});
-      stage.loadFile(blob, {{ ext: 'cif' }}).then(function (comp) {{
-        comp.addRepresentation('cartoon', {{ color: 'chainid' }});
-        const sele = {json.dumps(selection_clause)};
-        if (sele) {{
-          comp.addRepresentation('ball+stick', {{ sele: sele, color: 'red' }});
-          comp.autoView(sele);
-        }} else {{
-          comp.autoView();
-        }}
-      }});
-      window.addEventListener('resize', function() {{ stage.handleResize(); }});
-    </script>
-    """
-
-    components.html(html, height=620)
+                chain, resi = residue_index[idx - 1]
+                mapped.append(f"{chain}:{resi}")
+        if mapped:
+            st.caption(f"Selected residues in structure order: {', '.join(mapped)}")
 # Function to create a 3D visualization using Mol*
 # Function to display ptm and ipTM averages and ipTM matrix
 def display_entity_ptm_iptm_averages_and_matrix(summary_data, model_name):
