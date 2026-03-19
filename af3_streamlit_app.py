@@ -504,7 +504,10 @@ st.set_page_config(layout="wide")  # Use full width of the screen
 st.title("Protein Model Analysis")
 
 # Provide options for how users want to upload files or specify a folder
-file_option = st.radio("Choose how to provide files:", ("Upload Files", "Upload ZIP Folder"))
+file_option = st.radio(
+    "Choose how to provide files:",
+    ("Upload Files", "Upload ZIP Folder", "Folder from Shared System"),
+)
 
 # Initialize variables
 models = {}

@@ -4,7 +4,7 @@ This repository contains a Streamlit application designed for visualising and an
 
 ## Features
 
-- Data visualisation with Plotly and Seaborn
+- Data visualisation with Plotly
 - Molecular visualisation using streamlit_molstar
 - Support for JSON data extraction and processing
 
@@ -14,10 +14,11 @@ To install the required dependencies, clone this repository and run:
 
 ```bash
 pip install -r requirements.txt
-````
+```
 
 ## Usage
 To run the app locally, use the following command:
 
 ```bash
-streamlit run app_streamlit_final.py
+streamlit run af3_streamlit_app.py
+```
